@@ -4,7 +4,6 @@ import sys
 import math
 import json
 from enum import Enum
-from pygame.locals import *
 
 # Initialize pygame
 pygame.init()
@@ -47,18 +46,20 @@ class GameState(Enum):
     STORY = 8
     ACHIEVEMENTS = 9
     CHALLENGES = 10
+    LEVEL_SELECT = 11
 
 
 # Player class
 class Player:
-    def __init__(self):
+    def __init__(self, x_position=None):
         self.width = 40
         self.height = 50
-        self.rect = pygame.Rect(WIDTH // 2 - self.width // 2, HEIGHT - self.height - 20, self.width, self.height)
+        start_x = WIDTH // 2 - self.width // 2 if x_position is None else x_position
+        self.rect = pygame.Rect(start_x, HEIGHT - self.height - 20, self.width, self.height)
         self.speed = 6
         self.health = 100
         self.max_health = 100
-        self.coins = 0
+        self.coins = 50
         self.weapon_type = "laser"  # laser, missile, plasma
         self.weapon_power = 1
         self.weapons_unlocked = ["laser"]
@@ -68,6 +69,9 @@ class Player:
         self.score = 0
         self.lives = 3
         self.rocket_type = "basic"  # basic, advanced, ultimate
+        self.kills = 0
+        self.shoot_cooldown = 0
+        self.rapid_fire_timer = 0
 
     def move(self, dx):
         self.rect.x += dx
@@ -91,6 +95,8 @@ class Player:
     def unlock_weapon(self, weapon):
         if weapon not in self.weapons_unlocked:
             self.weapons_unlocked.append(weapon)
+            return True
+        return False
 
     def upgrade_weapon(self):
         if self.coins >= 50 * self.weapon_power:
@@ -122,6 +128,20 @@ class Player:
             self.shield_timer -= 1
             if self.shield_timer <= 0:
                 self.shield = False
+
+        if self.rapid_fire:
+            self.rapid_fire_timer -= 1
+            if self.rapid_fire_timer <= 0:
+                self.rapid_fire = False
+
+        if self.shoot_cooldown > 0:
+            self.shoot_cooldown -= 1
+
+    def switch_weapon(self, weapon):
+        if weapon in self.weapons_unlocked:
+            self.weapon_type = weapon
+            return True
+        return False
 
     def draw(self, surface):
         # Draw rocket based on type
@@ -157,16 +177,16 @@ class Player:
             shield_color = (0, 100, 255)
             pygame.draw.circle(surface, shield_color, self.rect.center, self.rect.width, 2)
 
-    def draw_health_bar(self, surface):
+    def draw_health_bar(self, surface, y_offset=10):
         bar_width = 200
         bar_height = 20
         fill = (self.health / self.max_health) * bar_width
-        outline_rect = pygame.Rect(10, 10, bar_width, bar_height)
-        fill_rect = pygame.Rect(10, 10, fill, bar_height)
+        outline_rect = pygame.Rect(10, y_offset, bar_width, bar_height)
+        fill_rect = pygame.Rect(10, y_offset, fill, bar_height)
         pygame.draw.rect(surface, RED, fill_rect)
         pygame.draw.rect(surface, WHITE, outline_rect, 2)
         health_text = FONT_SM.render(f"Health: {self.health}/{self.max_health}", True, WHITE)
-        surface.blit(health_text, (15, 12))
+        surface.blit(health_text, (15, y_offset + 2))
 
 
 # Enemy types
@@ -279,14 +299,14 @@ class Enemy:
 # Boss class
 class Boss:
     def __init__(self, level):
-        self.width = 200 + level * 20
-        self.height = 80 + level * 10
+        self.width = 200 + level * 10
+        self.height = 80 + level * 5
         self.rect = pygame.Rect(WIDTH // 2 - self.width // 2, 50, self.width, self.height)
-        self.speed = 2
-        self.health = 100 * level
-        self.max_health = 100 * level
+        self.speed = 1 + level * 0.2
+        self.health = 50 * level
+        self.max_health = 50 * level
         self.direction = 1  # 1 for right, -1 for left
-        self.shoot_cooldown = 30
+        self.shoot_cooldown = 40 - min(5, level)  # More time between shots
         self.attack_pattern = 0
         self.attack_timer = 0
         self.color = (200, 0, 0)
@@ -294,25 +314,31 @@ class Boss:
         self.shield_timer = 0
         self.level = level
         self.value = 100 * level
+        self.shield_cooldown = 120  # Cooldown before shield can be activated again
 
     def move(self):
         self.rect.x += self.speed * self.direction
         if self.rect.left <= 0 or self.rect.right >= WIDTH:
             self.direction *= -1
+            self.rect.y += 20  # Move down when hitting a wall
 
     def update_cooldown(self):
         if self.shoot_cooldown > 0:
             self.shoot_cooldown -= 1
+        if self.shield_cooldown > 0:
+            self.shield_cooldown -= 1
 
     def can_shoot(self):
         return self.shoot_cooldown <= 0
 
     def reset_cooldown(self):
-        self.shoot_cooldown = 30 - min(10, self.level)  # Faster shooting at higher levels
+        self.shoot_cooldown = 40 - min(5, self.level)  # Faster shooting at higher levels
 
     def activate_shield(self):
-        self.shield_active = True
-        self.shield_timer = 180  # 3 seconds
+        if self.shield_cooldown <= 0:
+            self.shield_active = True
+            self.shield_timer = 120  # 2 seconds for shield
+            self.shield_cooldown = 180  # 3 seconds cooldown
 
     def update_shield(self):
         if self.shield_active:
@@ -456,8 +482,10 @@ class Game:
     def __init__(self):
         self.state = GameState.START_MENU
         self.player = Player()
+        self.player2 = None
         self.level = 1
-        self.max_level = 7
+        self.max_level = 100
+        self.unlocked_levels = 1
         self.high_score = 0
         self.load_high_score()
         self.clock = pygame.time.Clock()
@@ -484,12 +512,25 @@ class Game:
                 "fire": pygame.K_SPACE,
                 "pause": pygame.K_p
             },
-            "difficulty": "normal"
+            "difficulty": "normal",
+            "two_players": False
         }
         self.tutorial_step = 0
         self.story_index = 0
-        self.player2 = Player() if self.settings.get("two_players", False) else None
         self.endless_mode = False
+        self.enemies_defeated = 0
+        self.enemies_to_defeat = 10
+        self.explosions = []
+        self.enemy_spawn_timer = 0
+        self.enemy_spawn_delay = 60  # frames between enemy spawns
+        self.level_stats = {
+            "coins_collected": 0,
+            "enemies_killed": 0,
+            "damage_taken": 0,
+            "time_taken": 0
+        }
+        self.level_start_time = pygame.time.get_ticks()
+        self.level_complete_time = 0
 
         # Story text
         self.story = [
@@ -505,6 +546,7 @@ class Game:
             "Welcome to Space Shooter!",
             "Move with LEFT and RIGHT arrow keys",
             "Press SPACE to shoot lasers",
+            "Press 1-3 to switch weapons",
             "Collect coins to buy upgrades in the shop",
             "Destroy enemies to earn points",
             "Avoid enemy fire and asteroids",
@@ -570,10 +612,18 @@ class Game:
         # Draw health bar
         self.player.draw_health_bar(surface)
 
+        # Draw player 2 health if two players
+        if self.player2:
+            self.player2.draw_health_bar(surface, 70)
+
         # Draw weapon info
         weapon_text = FONT_SM.render(f"Weapon: {self.player.weapon_type.title()} (Lvl {self.player.weapon_power})",
                                      True, CYAN)
         surface.blit(weapon_text, (WIDTH - weapon_text.get_width() - 10, 90))
+
+        # Draw weapon controls
+        weapons_text = FONT_SM.render("Weapons: 1-Laser 2-Missile 3-Plasma", True, CYAN)
+        surface.blit(weapons_text, (10, HEIGHT - 30))
 
         # Draw active power-ups
         y_offset = 130
@@ -582,7 +632,7 @@ class Game:
             surface.blit(shield_text, (WIDTH - shield_text.get_width() - 10, y_offset))
             y_offset += 30
 
-        if self.rapid_fire_active:
+        if self.player.rapid_fire:
             rapid_text = FONT_SM.render("RAPID FIRE ACTIVE", True, GREEN)
             surface.blit(rapid_text, (WIDTH - rapid_text.get_width() - 10, y_offset))
             y_offset += 30
@@ -618,6 +668,7 @@ class Game:
         # Menu options
         options = [
             ("Start Game", GameState.PLAYING),
+            ("Level Select", GameState.LEVEL_SELECT),
             ("Tutorial", GameState.TUTORIAL),
             ("Settings", GameState.SETTINGS),
             ("Achievements", GameState.ACHIEVEMENTS),
@@ -651,6 +702,65 @@ class Game:
         # High score
         high_score_text = FONT_MD.render(f"High Score: {self.high_score}", True, YELLOW)
         surface.blit(high_score_text, (WIDTH // 2 - high_score_text.get_width() // 2, HEIGHT - 100))
+
+    def draw_level_select(self, surface):
+        surface.fill(BLACK)
+        self.draw_stars(surface)
+
+        title = FONT_XL.render("LEVEL SELECT", True, WHITE)
+        surface.blit(title, (WIDTH // 2 - title.get_width() // 2, HEIGHT // 8))
+
+        # Calculate how many levels to show per row
+        levels_per_row = 10
+        level_buttons = []
+
+        for level_num in range(1, self.max_level + 1):
+            row = (level_num - 1) // levels_per_row
+            col = (level_num - 1) % levels_per_row
+
+            x_pos = WIDTH // 2 - (levels_per_row * 60) // 2 + col * 60
+            y_pos = HEIGHT // 5 + row * 80
+
+            rect = pygame.Rect(x_pos, y_pos, 50, 50)
+            level_buttons.append((rect, level_num))
+
+            # Draw level button
+            if level_num <= self.unlocked_levels:
+                color = (50, 150, 50)  # Unlocked level
+                text_color = WHITE
+            else:
+                color = (100, 100, 100)  # Locked level
+                text_color = (150, 150, 150)
+
+            pygame.draw.rect(surface, color, rect, border_radius=10)
+            pygame.draw.rect(surface, BLUE, rect, 2, border_radius=10)
+
+            level_text = FONT_MD.render(str(level_num), True, text_color)
+            surface.blit(level_text, (rect.centerx - level_text.get_width() // 2,
+                                      rect.centery - level_text.get_height() // 2))
+
+        # Back button
+        back_rect = pygame.Rect(50, HEIGHT - 100, 200, 50)
+        pygame.draw.rect(surface, (150, 50, 50), back_rect, border_radius=10)
+        pygame.draw.rect(surface, RED, back_rect, 2, border_radius=10)
+        back_text = FONT_MD.render("Back", True, WHITE)
+        surface.blit(back_text, (back_rect.centerx - back_text.get_width() // 2,
+                                 back_rect.centery - back_text.get_height() // 2))
+
+        # Handle mouse clicks
+        mouse_pos = pygame.mouse.get_pos()
+        mouse_pressed = pygame.mouse.get_pressed()[0]
+
+        # Check level buttons
+        for rect, level_num in level_buttons:
+            if rect.collidepoint(mouse_pos) and mouse_pressed and level_num <= self.unlocked_levels:
+                self.level = level_num
+                self.reset_game()
+                self.state = GameState.PLAYING
+
+        # Check back button
+        if back_rect.collidepoint(mouse_pos) and mouse_pressed:
+            self.state = GameState.START_MENU
 
     def draw_settings_menu(self, surface):
         surface.fill(BLACK)
@@ -769,15 +879,16 @@ class Game:
 
         # Shop items
         items = [
-            ("Weapon Upgrade", f"50 × {self.player.weapon_power} coins", self.player.upgrade_weapon),
-            ("Advanced Rocket", "200 coins", lambda: self.player.upgrade_rocket("advanced")),
-            ("Ultimate Rocket", "500 coins", lambda: self.player.upgrade_rocket("ultimate")),
-            ("Unlock Missiles", "300 coins", lambda: self.player.unlock_weapon("missile")),
-            ("Unlock Plasma Cannon", "500 coins", lambda: self.player.unlock_weapon("plasma")),
-            ("Back", "", lambda: setattr(self, 'state', GameState.PLAYING))
+            ("Weapon Upgrade", f"50 × {self.player.weapon_power} coins", "upgrade_weapon"),
+            ("Advanced Rocket", "200 coins", "upgrade_rocket:advanced"),
+            ("Ultimate Rocket", "500 coins", "upgrade_rocket:ultimate"),
+            ("Unlock Missiles", "300 coins", "unlock:missile"),
+            ("Unlock Plasma Cannon", "500 coins", "unlock:plasma"),
+            ("Back", "", "back")
         ]
 
         mouse_pos = pygame.mouse.get_pos()
+        mouse_pressed = pygame.mouse.get_pressed()[0]
 
         for i, (name, price, action) in enumerate(items):
             y_pos = HEIGHT // 4 + i * 70
@@ -792,8 +903,30 @@ class Game:
             # Draw item
             if rect.collidepoint(mouse_pos) and can_afford:
                 pygame.draw.rect(surface, (50, 100, 50), rect, border_radius=10)
-                if pygame.mouse.get_pressed()[0]:
-                    action()
+                if mouse_pressed:
+                    if action == "back":
+                        self.state = GameState.PLAYING
+                    elif action == "upgrade_weapon":
+                        if self.player.upgrade_weapon():
+                            # Successfully upgraded
+                            pass
+                    elif action.startswith("upgrade_rocket:"):
+                        rocket_type = action.split(":")[1]
+                        if self.player.upgrade_rocket(rocket_type):
+                            # Successfully upgraded
+                            pass
+                    elif action.startswith("unlock:"):
+                        weapon = action.split(":")[1]
+                        if weapon == "missile":
+                            if self.player.coins >= 300:
+                                self.player.coins -= 300
+                                self.player.unlock_weapon(weapon)
+                                self.player.switch_weapon(weapon)
+                        elif weapon == "plasma":
+                            if self.player.coins >= 500:
+                                self.player.coins -= 500
+                                self.player.unlock_weapon(weapon)
+                                self.player.switch_weapon(weapon)
             else:
                 color = (30, 60, 30) if can_afford else (60, 30, 30)
                 pygame.draw.rect(surface, color, rect, border_radius=10)
@@ -827,6 +960,7 @@ class Game:
         ]
 
         mouse_pos = pygame.mouse.get_pos()
+        mouse_pressed = pygame.mouse.get_pressed()[0]
 
         for i, (text, action) in enumerate(options):
             y_pos = HEIGHT // 3 + i * 80
@@ -835,7 +969,7 @@ class Game:
 
             if rect.collidepoint(mouse_pos):
                 pygame.draw.rect(surface, (50, 50, 100), rect, border_radius=10)
-                if pygame.mouse.get_pressed()[0]:
+                if mouse_pressed:
                     if action == "restart":
                         self.reset_level()
                     else:
@@ -849,25 +983,63 @@ class Game:
 
     def draw_level_complete(self, surface):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 150))
+        overlay.fill((0, 0, 0, 200))
         surface.blit(overlay, (0, 0))
 
         title = FONT_XL.render(f"LEVEL {self.level} COMPLETE!", True, GREEN)
         surface.blit(title, (WIDTH // 2 - title.get_width() // 2, HEIGHT // 4))
 
+        # Calculate time taken in seconds
+        time_taken = (self.level_complete_time - self.level_start_time) // 1000
+        minutes = time_taken // 60
+        seconds = time_taken % 60
+
         stats = [
             f"Score: {self.player.score}",
-            f"Coins Collected: {self.player.coins}",
-            f"Enemies Destroyed: {len(self.enemies)}",
-            f"Damage Taken: {100 - self.player.health}%"
+            f"Coins Collected: {self.level_stats['coins_collected']}",
+            f"Enemies Killed: {self.level_stats['enemies_killed']}",
+            f"Damage Taken: {self.level_stats['damage_taken']}",
+            f"Time Taken: {minutes:02d}:{seconds:02d}"
         ]
 
         for i, stat in enumerate(stats):
             text = FONT_LG.render(stat, True, WHITE)
             surface.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT // 3 + i * 60))
 
-        continue_text = FONT_MD.render("Press SPACE to continue to the next level", True, YELLOW)
-        surface.blit(continue_text, (WIDTH // 2 - continue_text.get_width() // 2, HEIGHT - 100))
+        # Draw buttons
+        button_width = 200
+        button_height = 60
+        button_margin = 30
+
+        # Home button
+        home_rect = pygame.Rect(
+            WIDTH // 2 - button_width - button_margin // 2,
+            HEIGHT - 150,
+            button_width,
+            button_height
+        )
+        pygame.draw.rect(surface, (200, 50, 50), home_rect, border_radius=10)
+        pygame.draw.rect(surface, RED, home_rect, 3, border_radius=10)
+        home_text = FONT_MD.render("Home", True, WHITE)
+        surface.blit(home_text, (home_rect.centerx - home_text.get_width() // 2,
+                                 home_rect.centery - home_text.get_height() // 2))
+
+        # Next level button
+        next_rect = pygame.Rect(
+            WIDTH // 2 + button_margin // 2,
+            HEIGHT - 150,
+            button_width,
+            button_height
+        )
+        pygame.draw.rect(surface, (50, 200, 50), next_rect, border_radius=10)
+        pygame.draw.rect(surface, GREEN, next_rect, 3, border_radius=10)
+        next_text = FONT_MD.render("Next Level", True, WHITE)
+        surface.blit(next_text, (next_rect.centerx - next_text.get_width() // 2,
+                                 next_rect.centery - next_text.get_height() // 2))
+
+        # Store button rects for click detection
+        self.home_button = home_rect
+        self.next_level_button = next_rect
 
     def spawn_enemy(self):
         # Determine enemy type based on level
@@ -883,9 +1055,7 @@ class Game:
         elif self.level == 5:
             enemy_types = [EnemyType.ASTEROID] * 3 + [EnemyType.SCOUT] * 2 + [EnemyType.FIGHTER] * 3 + [
                 EnemyType.BOMBER] * 2
-        elif self.level == 6:
-            enemy_types = [EnemyType.SCOUT] * 3 + [EnemyType.FIGHTER] * 3 + [EnemyType.BOMBER] * 2 + [EnemyType.ELITE]
-        else:  # Level 7 or endless
+        else:  # Level 6+ or endless
             enemy_types = [EnemyType.FIGHTER] * 2 + [EnemyType.BOMBER] * 3 + [EnemyType.ELITE] * 2
 
         enemy_type = random.choice(enemy_types)
@@ -929,7 +1099,7 @@ class Game:
 
     def check_achievements(self):
         # First Blood
-        if not self.achievements[0]["unlocked"] and self.player.score > 0:
+        if not self.achievements[0]["unlocked"] and self.enemies_defeated > 0:
             self.achievements[0]["unlocked"] = True
 
         # Coin Collector
@@ -953,11 +1123,16 @@ class Game:
             with open("high_score.json", "r") as file:
                 data = json.load(file)
                 self.high_score = data.get("high_score", 0)
+                self.unlocked_levels = data.get("unlocked_levels", 1)
         except:
             self.high_score = 0
+            self.unlocked_levels = 1
 
     def save_high_score(self):
-        data = {"high_score": self.high_score}
+        data = {
+            "high_score": self.high_score,
+            "unlocked_levels": self.unlocked_levels
+        }
         with open("high_score.json", "w") as file:
             json.dump(data, file)
 
@@ -985,17 +1160,32 @@ class Game:
 
     def reset_level(self):
         self.player.rect.x = WIDTH // 2 - self.player.width // 2
+        if self.player2:
+            self.player2.rect.x = WIDTH // 2 + 100
         self.projectiles = []
         self.enemies = []
         self.enemy_projectiles = []
         self.power_ups = []
         self.boss = None
         self.boss_active = False
-        self.rapid_fire_active = False
+        self.player.rapid_fire = False
         self.player.shield = False
         self.camera_shake = 0
         self.camera_offset = (0, 0)
         self.explosions = []
+        self.enemies_defeated = 0
+        self.enemies_to_defeat = 10 + self.level * 5
+
+        # Reset level stats
+        self.level_stats = {
+            "coins_collected": 0,
+            "enemies_killed": 0,
+            "damage_taken": 0,
+            "time_taken": 0
+        }
+
+        # Set start time for level
+        self.level_start_time = pygame.time.get_ticks()
 
         # Spawn initial enemies
         for _ in range(5 + self.level * 2):
@@ -1003,8 +1193,11 @@ class Game:
 
     def reset_game(self):
         self.player = Player()
-        self.level = 1
-        self.score = 0
+        if self.settings["two_players"]:
+            self.player2 = Player(WIDTH // 2 - 100)
+        else:
+            self.player2 = None
+
         self.reset_level()
         self.state = GameState.PLAYING
 
@@ -1014,18 +1207,16 @@ class Game:
             self.story_index = 0
 
     def next_level(self):
-        self.level += 1
-        if self.level > self.max_level:
-            # Switch to endless mode
-            self.endless_mode = True
+        # Unlock next level
+        if self.level == self.unlocked_levels:
+            self.unlocked_levels = min(self.max_level, self.unlocked_levels + 1)
+            self.save_high_score()
+
+        self.level = min(self.max_level, self.level + 1)
         self.reset_level()
-        self.state = GameState.STORY
-        self.story_index = 0
+        self.state = GameState.PLAYING
 
     def run(self):
-        self.explosions = []
-        self.reset_game()
-
         while True:
             # Event handling
             for event in pygame.event.get():
@@ -1038,7 +1229,7 @@ class Game:
                         if self.state in [GameState.PLAYING, GameState.PAUSED]:
                             self.state = GameState.PAUSED if self.state == GameState.PLAYING else GameState.PLAYING
                         elif self.state in [GameState.TUTORIAL, GameState.SETTINGS, GameState.ACHIEVEMENTS,
-                                            GameState.CHALLENGES, GameState.STORY]:
+                                            GameState.CHALLENGES, GameState.STORY, GameState.LEVEL_SELECT]:
                             self.state = GameState.START_MENU
 
                     if event.key == pygame.K_p and self.state == GameState.PLAYING:
@@ -1053,8 +1244,6 @@ class Game:
                             self.story_index += 1
                             if self.story_index >= len(self.story):
                                 self.state = GameState.PLAYING
-                        elif self.state == GameState.LEVEL_COMPLETE:
-                            self.next_level()
 
                     if event.key == pygame.K_r and self.state == GameState.GAME_OVER:
                         self.reset_game()
@@ -1062,33 +1251,89 @@ class Game:
                     if event.key == pygame.K_s and self.state == GameState.PLAYING:
                         self.state = GameState.SHOP
 
-                    # Shooting
-                    if event.key == pygame.K_SPACE and self.state == GameState.PLAYING:
-                        if self.player.weapon_type == "laser":
-                            weapon = WeaponType.LASER
-                        elif self.player.weapon_type == "missile":
-                            weapon = WeaponType.MISSILE
-                        elif self.player.weapon_type == "plasma":
-                            weapon = WeaponType.PLASMA
+                    # Weapon switching
+                    if event.key == pygame.K_1 and self.state == GameState.PLAYING:
+                        self.player.switch_weapon("laser")
+                    if event.key == pygame.K_2 and self.state == GameState.PLAYING and "missile" in self.player.weapons_unlocked:
+                        self.player.switch_weapon("missile")
+                    if event.key == pygame.K_3 and self.state == GameState.PLAYING and "plasma" in self.player.weapons_unlocked:
+                        self.player.switch_weapon("plasma")
 
-                        self.projectiles.append(Projectile(
-                            self.player.rect.centerx,
-                            self.player.rect.top,
-                            weapon,
-                            self.player.weapon_power
-                        ))
+                # Handle mouse clicks for level complete screen
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if self.state == GameState.LEVEL_COMPLETE:
+                        mouse_pos = pygame.mouse.get_pos()
+                        if hasattr(self, 'home_button') and self.home_button.collidepoint(mouse_pos):
+                            self.state = GameState.START_MENU
+                        elif hasattr(self, 'next_level_button') and self.next_level_button.collidepoint(mouse_pos):
+                            self.next_level()
 
             # Update game state
             if self.state == GameState.PLAYING:
-                # Player movement
+                # Player 1 movement
                 keys = pygame.key.get_pressed()
                 if keys[pygame.K_LEFT]:
                     self.player.move(-self.player.speed)
                 if keys[pygame.K_RIGHT]:
                     self.player.move(self.player.speed)
 
+                # Player 2 movement
+                if self.player2:
+                    if keys[pygame.K_a]:
+                        self.player2.move(-self.player2.speed)
+                    if keys[pygame.K_d]:
+                        self.player2.move(self.player2.speed)
+
+                # Player 1 shooting
+                if keys[pygame.K_SPACE] and self.player.shoot_cooldown <= 0:
+                    # Determine weapon type
+                    if self.player.weapon_type == "laser":
+                        weapon = WeaponType.LASER
+                    elif self.player.weapon_type == "missile":
+                        weapon = WeaponType.MISSILE
+                    elif self.player.weapon_type == "plasma":
+                        weapon = WeaponType.PLASMA
+
+                    self.projectiles.append(Projectile(
+                        self.player.rect.centerx,
+                        self.player.rect.top,
+                        weapon,
+                        self.player.weapon_power
+                    ))
+
+                    # Set cooldown based on rapid fire
+                    if self.player.rapid_fire:
+                        self.player.shoot_cooldown = 5  # Very fast shooting
+                    else:
+                        self.player.shoot_cooldown = 15  # Normal shooting
+
+                # Shooting for player 2
+                if self.player2 and keys[pygame.K_w] and self.player2.shoot_cooldown <= 0:
+                    # Determine weapon type
+                    if self.player2.weapon_type == "laser":
+                        weapon = WeaponType.LASER
+                    elif self.player2.weapon_type == "missile":
+                        weapon = WeaponType.MISSILE
+                    elif self.player2.weapon_type == "plasma":
+                        weapon = WeaponType.PLASMA
+
+                    self.projectiles.append(Projectile(
+                        self.player2.rect.centerx,
+                        self.player2.rect.top,
+                        weapon,
+                        self.player2.weapon_power
+                    ))
+
+                    # Set cooldown for player2
+                    if self.player2.rapid_fire:
+                        self.player2.shoot_cooldown = 5
+                    else:
+                        self.player2.shoot_cooldown = 15
+
                 # Update player
                 self.player.update()
+                if self.player2:
+                    self.player2.update()
 
                 # Update camera shake
                 self.update_camera_shake()
@@ -1108,8 +1353,18 @@ class Game:
                     if proj.rect.colliderect(self.player.rect):
                         if self.player.take_damage(proj.damage):
                             self.create_explosion(proj.rect.centerx, proj.rect.centery, 10)
+                            self.level_stats['damage_taken'] += proj.damage
                         self.enemy_projectiles.remove(proj)
                         if self.player.health <= 0:
+                            self.state = GameState.GAME_OVER
+
+                    # Check collision with player2
+                    if self.player2 and proj.rect.colliderect(self.player2.rect):
+                        if self.player2.take_damage(proj.damage):
+                            self.create_explosion(proj.rect.centerx, proj.rect.centery, 10)
+                            self.level_stats['damage_taken'] += proj.damage
+                        self.enemy_projectiles.remove(proj)
+                        if self.player2.health <= 0:
                             self.state = GameState.GAME_OVER
 
                 # Update enemies
@@ -1131,8 +1386,22 @@ class Game:
                     if enemy.rect.colliderect(self.player.rect):
                         if self.player.take_damage(10):
                             self.create_explosion(enemy.rect.centerx, enemy.rect.centery, 20)
+                            self.level_stats['damage_taken'] += 10
                         self.enemies.remove(enemy)
+                        self.enemies_defeated += 1
+                        self.level_stats['enemies_killed'] += 1
                         if self.player.health <= 0:
+                            self.state = GameState.GAME_OVER
+
+                    # Enemy collision with player2
+                    if self.player2 and enemy.rect.colliderect(self.player2.rect):
+                        if self.player2.take_damage(10):
+                            self.create_explosion(enemy.rect.centerx, enemy.rect.centery, 20)
+                            self.level_stats['damage_taken'] += 10
+                        self.enemies.remove(enemy)
+                        self.enemies_defeated += 1
+                        self.level_stats['enemies_killed'] += 1
+                        if self.player2.health <= 0:
                             self.state = GameState.GAME_OVER
 
                     # Remove enemies that go off screen
@@ -1169,15 +1438,26 @@ class Game:
                     if self.boss.rect.colliderect(self.player.rect):
                         if self.player.take_damage(20):
                             self.create_explosion(self.boss.rect.centerx, self.boss.rect.centery, 30)
+                            self.level_stats['damage_taken'] += 20
                         if self.player.health <= 0:
+                            self.state = GameState.GAME_OVER
+
+                    # Boss collision with player2
+                    if self.player2 and self.boss.rect.colliderect(self.player2.rect):
+                        if self.player2.take_damage(20):
+                            self.create_explosion(self.boss.rect.centerx, self.boss.rect.centery, 30)
+                            self.level_stats['damage_taken'] += 20
+                        if self.player2.health <= 0:
                             self.state = GameState.GAME_OVER
 
                     # Check if boss is defeated
                     if self.boss.health <= 0:
                         self.player.add_coins(self.boss.value)
                         self.player.score += self.boss.value * 10
+                        self.level_stats['coins_collected'] += self.boss.value
                         self.create_explosion(self.boss.rect.centerx, self.boss.rect.centery, 50)
                         self.boss_active = False
+                        self.level_complete_time = pygame.time.get_ticks()
                         self.state = GameState.LEVEL_COMPLETE
 
                 # Check collisions between player projectiles and enemies
@@ -1189,6 +1469,9 @@ class Game:
                             if enemy.health <= 0:
                                 self.player.score += enemy.value
                                 self.player.add_coins(enemy.value)
+                                self.level_stats['coins_collected'] += enemy.value
+                                self.enemies_defeated += 1
+                                self.level_stats['enemies_killed'] += 1
 
                                 # Chance to drop power-up
                                 if random.random() < enemy.drop_chance:
@@ -1219,11 +1502,12 @@ class Game:
                     if power.rect.colliderect(self.player.rect):
                         if power.type == PowerUpType.COIN:
                             self.player.add_coins(5)
+                            self.level_stats['coins_collected'] += 5
                         elif power.type == PowerUpType.HEALTH:
                             self.player.heal(20)
                         elif power.type == PowerUpType.RAPID_FIRE:
-                            self.rapid_fire_active = True
-                            self.rapid_fire_timer = 300
+                            self.player.rapid_fire = True
+                            self.player.rapid_fire_timer = 300
                         elif power.type == PowerUpType.SHIELD:
                             self.player.activate_shield()
                         elif power.type == PowerUpType.GUN:
@@ -1233,22 +1517,37 @@ class Game:
                                 self.player.unlock_weapon("plasma")
                         self.power_ups.remove(power)
 
+                    # Power-up collision with player2
+                    if self.player2 and power.rect.colliderect(self.player2.rect):
+                        if power.type == PowerUpType.COIN:
+                            self.player.add_coins(5)  # Only one coin counter
+                            self.level_stats['coins_collected'] += 5
+                        elif power.type == PowerUpType.HEALTH:
+                            self.player2.heal(20)
+                        elif power.type == PowerUpType.RAPID_FIRE:
+                            self.player2.rapid_fire = True
+                            self.player2.rapid_fire_timer = 300
+                        elif power.type == PowerUpType.SHIELD:
+                            self.player2.activate_shield()
+                        elif power.type == PowerUpType.GUN:
+                            if "missile" not in self.player2.weapons_unlocked:
+                                self.player2.unlock_weapon("missile")
+                            elif "plasma" not in self.player2.weapons_unlocked:
+                                self.player2.unlock_weapon("plasma")
+                        if power in self.power_ups:
+                            self.power_ups.remove(power)
+
                     # Remove power-ups that go off screen
                     if power.rect.top > HEIGHT:
                         self.power_ups.remove(power)
-
-                # Update rapid fire
-                if self.rapid_fire_active:
-                    self.rapid_fire_timer -= 1
-                    if self.rapid_fire_timer <= 0:
-                        self.rapid_fire_active = False
 
                 # Spawn new enemies
                 if len(self.enemies) < 5 + self.level and random.random() < 0.02:
                     self.enemies.append(self.spawn_enemy())
 
                 # Spawn boss when enemies are cleared
-                if not self.boss_active and len(self.enemies) == 0:
+                if not self.boss_active and self.enemies_defeated >= self.enemies_to_defeat:
+                    self.enemies = []  # Clear existing enemies
                     self.spawn_boss()
 
                 # Update explosions
@@ -1273,6 +1572,8 @@ class Game:
             if self.state == GameState.PLAYING:
                 # Draw player
                 self.player.draw(offset_surface)
+                if self.player2:
+                    self.player2.draw(offset_surface)
 
                 # Draw projectiles
                 for proj in self.projectiles:
@@ -1305,6 +1606,9 @@ class Game:
 
             elif self.state == GameState.START_MENU:
                 self.draw_start_menu(offset_surface)
+
+            elif self.state == GameState.LEVEL_SELECT:
+                self.draw_level_select(offset_surface)
 
             elif self.state == GameState.SETTINGS:
                 self.draw_settings_menu(offset_surface)
