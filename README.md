@@ -1,4 +1,4 @@
-#**Space Shooter Game**
+**Space Shooter Game**
 
 ####Space Shooter is a feature-rich 2D arcade-style game developed using Python and Pygame. It immerses players in fast-paced space battles with a wide variety of weapons, enemies, ####and power-ups. Designed for both solo and cooperative play, the game offers smooth controls, exciting progression, and visually engaging effects to keep players hooked.
 
